@@ -2,8 +2,15 @@
 
 import { useSession, signOut } from "next-auth/react";
 import { useRouter } from "next/navigation";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import StatsTable from "@/components/StatsTable";
+
+const TIME_RANGES = {
+  SIX_MONTHS: { label: "6 months", months: 6 },
+  TWELVE_MONTHS: { label: "12 months", months: 12 },
+} as const;
+
+type RangeKey = keyof typeof TIME_RANGES;
 
 interface PersonItem {
   name: string;
@@ -34,10 +41,49 @@ type AnalysisState =
   | { status: "done"; data: AnalysisResult }
   | { status: "error"; message: string };
 
+const CACHE_TTL = 30 * 60 * 1000;
+
+function saveCache(months: number, data: AnalysisResult): void {
+  try {
+    sessionStorage.setItem(
+      `gcal_${months}`,
+      JSON.stringify({ data, ts: Date.now() })
+    );
+  } catch {
+    // sessionStorage full or unavailable — ignore
+  }
+}
+
+function loadCache(months: number): AnalysisResult | null {
+  try {
+    const raw = sessionStorage.getItem(`gcal_${months}`);
+    if (!raw) return null;
+    const { data, ts } = JSON.parse(raw);
+    if (Date.now() - ts > CACHE_TTL) {
+      sessionStorage.removeItem(`gcal_${months}`);
+      return null;
+    }
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchAnalysis(months: number): Promise<AnalysisResult> {
+  const res = await fetch(`/api/analyze?months=${months}`);
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error || "Analysis failed");
+  }
+  return res.json();
+}
+
 export default function Dashboard() {
   const { data: session, status } = useSession();
   const router = useRouter();
   const [analysis, setAnalysis] = useState<AnalysisState>({ status: "idle" });
+  const [selectedRange, setSelectedRange] = useState<RangeKey>("SIX_MONTHS");
+  const prefetchedRef = useRef(false);
 
   useEffect(() => {
     if (status === "unauthenticated") {
@@ -45,21 +91,21 @@ export default function Dashboard() {
     }
   }, [status, router]);
 
-  const runAnalysis = useCallback(async () => {
+  const runAnalysis = useCallback(async (months: number) => {
+    const cached = loadCache(months);
+    if (cached) {
+      setAnalysis({ status: "done", data: cached });
+      return;
+    }
+
     setAnalysis({
       status: "loading",
       message: "Fetching your calendar events...",
     });
 
     try {
-      const res = await fetch("/api/analyze");
-
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || "Analysis failed");
-      }
-
-      const data: AnalysisResult = await res.json();
+      const data = await fetchAnalysis(months);
+      saveCache(months, data);
       setAnalysis({ status: "done", data });
     } catch (error: unknown) {
       const message =
@@ -67,6 +113,26 @@ export default function Dashboard() {
       setAnalysis({ status: "error", message });
     }
   }, []);
+
+  // Background pre-fetch: after 6-month results are live, silently fetch 12 months
+  useEffect(() => {
+    if (analysis.status === "done" && !prefetchedRef.current) {
+      prefetchedRef.current = true;
+      if (!loadCache(12)) {
+        fetchAnalysis(12)
+          .then((data) => saveCache(12, data))
+          .catch(() => {});
+      }
+    }
+  }, [analysis.status]);
+
+  const handleRangeChange = useCallback(
+    (key: RangeKey) => {
+      setSelectedRange(key);
+      runAnalysis(TIME_RANGES[key].months);
+    },
+    [runAnalysis]
+  );
 
   if (status === "loading") {
     return (
@@ -105,16 +171,24 @@ export default function Dashboard() {
                 Ready to analyze
               </h2>
               <p className="text-zinc-400 text-lg max-w-md mx-auto">
-                We'll scan the last 12 months of your calendar and find out who
-                you hang out with most.
+                We'll scan your calendar and find out who you hang out with
+                most.
               </p>
             </div>
-            <button
-              onClick={runAnalysis}
-              className="bg-blue-600 hover:bg-blue-500 text-white font-semibold py-3 px-8 rounded-xl transition-colors cursor-pointer"
-            >
-              Analyze My Calendar
-            </button>
+            <div className="flex flex-col items-center gap-4">
+              <RangeToggle
+                selectedRange={selectedRange}
+                onChange={(key) => setSelectedRange(key)}
+              />
+              <button
+                onClick={() =>
+                  runAnalysis(TIME_RANGES[selectedRange].months)
+                }
+                className="bg-blue-600 hover:bg-blue-500 text-white font-semibold py-3 px-8 rounded-xl transition-colors cursor-pointer"
+              >
+                Analyze My Calendar
+              </button>
+            </div>
           </div>
         )}
 
@@ -155,7 +229,9 @@ export default function Dashboard() {
             </div>
             <div>
               <button
-                onClick={runAnalysis}
+                onClick={() =>
+                  runAnalysis(TIME_RANGES[selectedRange].months)
+                }
                 className="text-sm text-zinc-400 hover:text-white transition-colors cursor-pointer"
               >
                 Try again
@@ -166,6 +242,11 @@ export default function Dashboard() {
 
         {analysis.status === "done" && (
           <>
+            <RangeToggle
+              selectedRange={selectedRange}
+              onChange={handleRangeChange}
+            />
+
             <div className="grid grid-cols-3 gap-4">
               <StatCard
                 label="Total Events"
@@ -198,7 +279,9 @@ export default function Dashboard() {
 
             <div className="text-center pt-4">
               <button
-                onClick={runAnalysis}
+                onClick={() =>
+                  runAnalysis(TIME_RANGES[selectedRange].months)
+                }
                 className="text-sm text-zinc-500 hover:text-white transition-colors cursor-pointer"
               >
                 Re-analyze
@@ -207,6 +290,36 @@ export default function Dashboard() {
           </>
         )}
       </main>
+    </div>
+  );
+}
+
+function RangeToggle({
+  selectedRange,
+  onChange,
+}: {
+  selectedRange: RangeKey;
+  onChange: (key: RangeKey) => void;
+}) {
+  return (
+    <div
+      className="inline-flex rounded-xl bg-zinc-900 border border-zinc-800 p-1"
+      role="group"
+      aria-label="Time range"
+    >
+      {(Object.keys(TIME_RANGES) as RangeKey[]).map((key) => (
+        <button
+          key={key}
+          onClick={() => onChange(key)}
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors cursor-pointer ${
+            selectedRange === key
+              ? "bg-zinc-700 text-white"
+              : "text-zinc-400 hover:text-white"
+          }`}
+        >
+          {TIME_RANGES[key].label}
+        </button>
+      ))}
     </div>
   );
 }

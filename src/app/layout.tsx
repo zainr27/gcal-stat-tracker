@@ -5,7 +5,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "GCAL Stat Tracker",
   description:
-    "See who you hang out with most, powered by your Google Calendar",
+    "See who and where you hang out with most, powered by your Google Calendar",
 };
 
 export default function RootLayout({

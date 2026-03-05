@@ -1,15 +1,14 @@
 import { google, calendar_v3 } from "googleapis";
 
 export interface CalendarEvent {
-  id: string;
   summary: string;
   location?: string;
   start: string;
-  end: string;
 }
 
 export async function getCalendarEvents(
-  accessToken: string
+  accessToken: string,
+  rangeMonths: number = 12
 ): Promise<CalendarEvent[]> {
   const oauth2Client = new google.auth.OAuth2();
   oauth2Client.setCredentials({ access_token: accessToken });
@@ -17,7 +16,7 @@ export async function getCalendarEvents(
   const calendar = google.calendar({ version: "v3", auth: oauth2Client });
 
   const timeMin = new Date();
-  timeMin.setFullYear(timeMin.getFullYear() - 1);
+  timeMin.setMonth(timeMin.getMonth() - rangeMonths);
 
   const allEvents: CalendarEvent[] = [];
   let pageToken: string | undefined;
@@ -30,6 +29,7 @@ export async function getCalendarEvents(
       maxResults: 2500,
       singleEvents: true,
       orderBy: "startTime",
+      fields: "items(summary,location,start/dateTime,start/date),nextPageToken",
       pageToken,
     });
 
@@ -37,11 +37,9 @@ export async function getCalendarEvents(
     for (const item of items) {
       if (!item.summary) continue;
       allEvents.push({
-        id: item.id || "",
         summary: item.summary,
         location: item.location || undefined,
         start: getEventTime(item.start),
-        end: getEventTime(item.end),
       });
     }
 
